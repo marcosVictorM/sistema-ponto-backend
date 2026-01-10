@@ -1,28 +1,28 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework import status
 from django.utils import timezone
+from datetime import timedelta, datetime
 from .models import RegistroPonto
 from .serializers import RegistroPontoSerializer
-from datetime import timedelta, datetime
-from django.db.models import Sum
-from rest_framework.decorators import api_view, permission_classes
 
-
+# --- CLASSE 1: STATUS DO DIA (Tela Principal) ---
 class StatusPontoView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         usuario = request.user
-        hoje = timezone.localdate()  # <--- Isso força pegar a data do Brasil
+        # FIX: Usa a data local do Brasil, não a do servidor (UTC)
+        hoje = timezone.localdate()
         
         registros_hoje = RegistroPonto.objects.filter(
             usuario=usuario, 
             data_hora__date=hoje
         ).order_by('data_hora')
 
-        # === LÓGICA DE CÁLCULO DE HORAS ===
+        # === LÓGICA DE CÁLCULO DE HORAS DO DIA ===
         horas_trabalhadas = timedelta(0)
         entrada_temp = None
 
@@ -35,19 +35,15 @@ class StatusPontoView(APIView):
                     horas_trabalhadas += delta
                     entrada_temp = None
         
-        # Se ele ainda está trabalhando (tem entrada sem saída), somamos até "agora" para mostrar em tempo real?
-        # Para simplificar o MVP, vamos mostrar apenas o que já foi "fechado".
-        
-        # Convertendo para string "HH:MM"
         total_segundos = int(horas_trabalhadas.total_seconds())
         horas, remainder = divmod(total_segundos, 3600)
         minutos, _ = divmod(remainder, 60)
         horas_formatadas = f"{horas:02}:{minutos:02}"
-        # ===================================
+        # =========================================
 
         ultimo_registro = registros_hoje.last()
 
-        # (Mantém a lógica da Máquina de Estados igualzinha estava antes...)
+        # Máquina de Estados (Define qual o próximo botão)
         if not ultimo_registro:
             proximo = 'ENTRADA'
             mensagem = 'Registrar Entrada'
@@ -69,73 +65,67 @@ class StatusPontoView(APIView):
             'ultimo_registro': RegistroPontoSerializer(ultimo_registro).data if ultimo_registro else None,
             'proxima_acao': proximo,
             'texto_botao': mensagem,
-            'horas_trabalhadas': horas_formatadas # Enviamos o total calculado
+            'horas_trabalhadas': horas_formatadas
         })
-    
+
+# --- CLASSE 2: REGISTRAR BATIDA (Botão) ---
 class RegistrarPontoView(APIView):
-    """
-    Recebe o clique do botão e salva no banco
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         usuario = request.user
         dados = request.data
         
-        # Aqui validamos qual o tipo de batida com base na lógica do StatusPonto
-        # (Replicamos a lógica ou confiamos no frontend enviar o tipo correto? 
-        # Por segurança, o ideal é o backend decidir, mas para MVP vamos aceitar o tipo enviado)
-        
         tipo_enviado = dados.get('tipo')
         lat = dados.get('latitude')
         long = dados.get('longitude')
         
-        # TODO: Aqui entraria a lógica de calcular a distância (Geofencing)
-        # Por enquanto vamos salvar direto
-        
         novo_ponto = RegistroPonto.objects.create(
             usuario=usuario,
             tipo=tipo_enviado,
-            data_hora=timezone.now(),
+            data_hora=timezone.now(), # Salva com fuso (UTC), o banco converte depois
             latitude=lat,
             longitude=long,
-            localizacao_valida=True # Assumindo válido para teste
+            localizacao_valida=True
         )
         
         return Response(RegistroPontoSerializer(novo_ponto).data, status=status.HTTP_201_CREATED)
+
+# --- FUNÇÃO 3: RELATÓRIO MENSAL (Tela de Histórico) ---
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def relatorio_mensal(request):
     usuario = request.user
+    # FIX: Usa localdate aqui também para não buscar pontos do "amanhã"
     hoje = timezone.localdate()
     
     # Pega os últimos 30 dias
     data_inicio = hoje - timedelta(days=30)
     
-    # Busca os pontos do usuário
     registros = RegistroPonto.objects.filter(
         usuario=usuario, 
         data_hora__date__gte=data_inicio
     ).order_by('-data_hora')
 
-    # Agrupa os registros por dia
+    # Agrupa por dia (ex: '2026-01-09': [ponto1, ponto2])
     dias_trabalhados = {}
     for ponto in registros:
+        # Converte para data local para agrupar corretamente
         data_str = ponto.data_hora.astimezone().strftime('%Y-%m-%d')
         
         if data_str not in dias_trabalhados:
             dias_trabalhados[data_str] = []
-        
         dias_trabalhados[data_str].append(ponto.data_hora)
 
     historico = []
     saldo_minutos_total = 0
-    JORNADA_PADRAO = 8 * 60 # 480 minutos (8 horas)
+    JORNADA_PADRAO = 8 * 60 # 480 minutos
 
     for data, horarios in dias_trabalhados.items():
-        horarios.sort()
+        horarios.sort() # Garante ordem cronológica
         minutos_trabalhados = 0
         
+        # Calcula pares (Entrada -> Saída)
         for i in range(0, len(horarios), 2):
             if i + 1 < len(horarios):
                 entrada = horarios[i]
@@ -147,6 +137,7 @@ def relatorio_mensal(request):
         mins = int(minutos_trabalhados % 60)
         tempo_formatado = f"{horas:02d}:{mins:02d}"
 
+        # Calcula Banco de Horas (Ignora o dia de hoje pois ainda não acabou)
         saldo_dia_str = "Em andamento"
         if data != hoje.strftime('%Y-%m-%d'):
             saldo_dia = minutos_trabalhados - JORNADA_PADRAO
