@@ -133,8 +133,9 @@ AUTH_USER_MODEL = 'core.Usuario'
 # Configuração do DRF para aceitar Login via App (Basic Auth) e ignorar CSRF
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.TokenAuthentication',  # <--- ESSENCIAL PARA O APP
+        'rest_framework.authentication.SessionAuthentication', # <--- Importante para o navegador/Admin
         'rest_framework.authentication.BasicAuthentication',
-        # 'rest_framework.authentication.SessionAuthentication', # <-- Comentamos este para evitar o erro 403 CSRF
     ],
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
