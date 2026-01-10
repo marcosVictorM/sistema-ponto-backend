@@ -91,73 +91,80 @@ class RegistrarPontoView(APIView):
         
         return Response(RegistroPontoSerializer(novo_ponto).data, status=status.HTTP_201_CREATED)
 
-# --- FUNÇÃO 3: RELATÓRIO MENSAL (Tela de Histórico) ---
+# --- SUBSTITUIR SOMENTE A ÚLTIMA FUNÇÃO ---
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def relatorio_mensal(request):
-    usuario = request.user
-    # FIX: Usa localdate aqui também para não buscar pontos do "amanhã"
-    hoje = timezone.localdate()
-    
-    # Pega os últimos 30 dias
-    data_inicio = hoje - timedelta(days=30)
-    
-    registros = RegistroPonto.objects.filter(
-        usuario=usuario, 
-        data_hora__date__gte=data_inicio
-    ).order_by('-data_hora')
-
-    # Agrupa por dia (ex: '2026-01-09': [ponto1, ponto2])
-    dias_trabalhados = {}
-    for ponto in registros:
-        # Converte para data local para agrupar corretamente
-        data_str = ponto.data_hora.astimezone().strftime('%Y-%m-%d')
+    try:
+        usuario = request.user
+        hoje = timezone.localdate()
+        data_inicio = hoje - timedelta(days=30)
         
-        if data_str not in dias_trabalhados:
-            dias_trabalhados[data_str] = []
-        dias_trabalhados[data_str].append(ponto.data_hora)
+        registros = RegistroPonto.objects.filter(
+            usuario=usuario, 
+            data_hora__date__gte=data_inicio
+        ).order_by('-data_hora')
 
-    historico = []
-    saldo_minutos_total = 0
-    JORNADA_PADRAO = 8 * 60 # 480 minutos
+        dias_trabalhados = {}
+        for ponto in registros:
+            # TENTATIVA 1: Converter data com proteção
+            try:
+                data_str = ponto.data_hora.astimezone().strftime('%Y-%m-%d')
+            except Exception as e:
+                # Se der erro de timezone, usa a data crua do banco
+                data_str = str(ponto.data_hora.date())
 
-    for data, horarios in dias_trabalhados.items():
-        horarios.sort() # Garante ordem cronológica
-        minutos_trabalhados = 0
-        
-        # Calcula pares (Entrada -> Saída)
-        for i in range(0, len(horarios), 2):
-            if i + 1 < len(horarios):
-                entrada = horarios[i]
-                saida = horarios[i+1]
-                diferenca = saida - entrada
-                minutos_trabalhados += diferenca.total_seconds() / 60
-        
-        horas = int(minutos_trabalhados // 60)
-        mins = int(minutos_trabalhados % 60)
-        tempo_formatado = f"{horas:02d}:{mins:02d}"
+            if data_str not in dias_trabalhados:
+                dias_trabalhados[data_str] = []
+            dias_trabalhados[data_str].append(ponto.data_hora)
 
-        # Calcula Banco de Horas (Ignora o dia de hoje pois ainda não acabou)
-        saldo_dia_str = "Em andamento"
-        if data != hoje.strftime('%Y-%m-%d'):
-            saldo_dia = minutos_trabalhados - JORNADA_PADRAO
-            saldo_minutos_total += saldo_dia
+        historico = []
+        saldo_minutos_total = 0
+        JORNADA_PADRAO = 8 * 60
+
+        for data, horarios in dias_trabalhados.items():
+            horarios.sort()
+            minutos_trabalhados = 0
             
-            sinal = "+" if saldo_dia >= 0 else "-"
-            saldo_abs = abs(saldo_dia)
-            saldo_dia_str = f"{sinal}{int(saldo_abs // 60):02d}:{int(saldo_abs % 60):02d}"
+            for i in range(0, len(horarios), 2):
+                if i + 1 < len(horarios):
+                    entrada = horarios[i]
+                    saida = horarios[i+1]
+                    diferenca = saida - entrada
+                    minutos_trabalhados += diferenca.total_seconds() / 60
+            
+            horas = int(minutos_trabalhados // 60)
+            mins = int(minutos_trabalhados % 60)
+            tempo_formatado = f"{horas:02d}:{mins:02d}"
 
-        historico.append({
-            "data": datetime.strptime(data, '%Y-%m-%d').strftime('%d/%m'),
-            "horas_trabalhadas": tempo_formatado,
-            "saldo_dia": saldo_dia_str
+            saldo_dia_str = "Em andamento"
+            # Proteção na comparação de data
+            if data != str(hoje):
+                saldo_dia = minutos_trabalhados - JORNADA_PADRAO
+                saldo_minutos_total += saldo_dia
+                sinal = "+" if saldo_dia >= 0 else "-"
+                saldo_dia_str = f"{sinal}{int(abs(saldo_dia) // 60):02d}:{int(abs(saldo_dia) % 60):02d}"
+
+            historico.append({
+                "data": datetime.strptime(data, '%Y-%m-%d').strftime('%d/%m'),
+                "horas_trabalhadas": tempo_formatado,
+                "saldo_dia": saldo_dia_str
+            })
+
+        sinal_total = "+" if saldo_minutos_total >= 0 else "-"
+        saldo_total_str = f"{sinal_total}{int(abs(saldo_minutos_total) // 60):02d}:{int(abs(saldo_minutos_total) % 60):02d}"
+
+        return Response({
+            "saldo_banco_horas": saldo_total_str,
+            "historico": historico
         })
 
-    sinal_total = "+" if saldo_minutos_total >= 0 else "-"
-    saldo_total_abs = abs(saldo_minutos_total)
-    saldo_total_str = f"{sinal_total}{int(saldo_total_abs // 60):02d}:{int(saldo_total_abs % 60):02d}"
-
-    return Response({
-        "saldo_banco_horas": saldo_total_str,
-        "historico": historico
-    })
+    except Exception as e:
+        # AQUI ESTÁ O TRUQUE: Devolvemos o erro como se fosse o saldo!
+        import traceback
+        print(traceback.format_exc()) # Loga no servidor
+        return Response({
+            "saldo_banco_horas": f"ERRO: {str(e)}", 
+            "historico": []
+        })
