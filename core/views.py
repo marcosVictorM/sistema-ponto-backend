@@ -91,30 +91,34 @@ class RegistrarPontoView(APIView):
         
         return Response(RegistroPontoSerializer(novo_ponto).data, status=status.HTTP_201_CREATED)
 
-# --- SUBSTITUIR SOMENTE A ÚLTIMA FUNÇÃO ---
+# --- SUBSTITUA A ÚLTIMA FUNÇÃO POR ESTA ---
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def relatorio_mensal(request):
     try:
+        # 1. Imports de segurança (Garante que não é falta de import)
+        from .models import RegistroPonto
+        from django.utils import timezone
+        from datetime import timedelta, datetime
+        
         usuario = request.user
         hoje = timezone.localdate()
         data_inicio = hoje - timedelta(days=30)
         
+        # 2. Busca os dados
         registros = RegistroPonto.objects.filter(
             usuario=usuario, 
             data_hora__date__gte=data_inicio
         ).order_by('-data_hora')
 
         dias_trabalhados = {}
+        
+        # 3. Processamento seguro
         for ponto in registros:
-            # TENTATIVA 1: Converter data com proteção
-            try:
-                data_str = ponto.data_hora.astimezone().strftime('%Y-%m-%d')
-            except Exception as e:
-                # Se der erro de timezone, usa a data crua do banco
-                data_str = str(ponto.data_hora.date())
-
+            # Força conversão para string para evitar erros de data
+            data_str = ponto.data_hora.astimezone().strftime('%Y-%m-%d')
+            
             if data_str not in dias_trabalhados:
                 dias_trabalhados[data_str] = []
             dias_trabalhados[data_str].append(ponto.data_hora)
@@ -127,10 +131,12 @@ def relatorio_mensal(request):
             horarios.sort()
             minutos_trabalhados = 0
             
+            # Lógica de pares
             for i in range(0, len(horarios), 2):
                 if i + 1 < len(horarios):
                     entrada = horarios[i]
                     saida = horarios[i+1]
+                    # Garante que ambos são comparáveis
                     diferenca = saida - entrada
                     minutos_trabalhados += diferenca.total_seconds() / 60
             
@@ -139,7 +145,6 @@ def relatorio_mensal(request):
             tempo_formatado = f"{horas:02d}:{mins:02d}"
 
             saldo_dia_str = "Em andamento"
-            # Proteção na comparação de data
             if data != str(hoje):
                 saldo_dia = minutos_trabalhados - JORNADA_PADRAO
                 saldo_minutos_total += saldo_dia
@@ -161,10 +166,16 @@ def relatorio_mensal(request):
         })
 
     except Exception as e:
-        # AQUI ESTÁ O TRUQUE: Devolvemos o erro como se fosse o saldo!
+        # AQUI O SEGREDO: Se der erro, ele devolve o erro no lugar do histórico
         import traceback
-        print(traceback.format_exc()) # Loga no servidor
+        print(traceback.format_exc()) # Tenta imprimir no log
         return Response({
-            "saldo_banco_horas": f"ERRO: {str(e)}", 
-            "historico": []
+            "saldo_banco_horas": "ERRO",
+            "historico": [
+                {
+                    "data": "ERRO CRÍTICO", 
+                    "horas_trabalhadas": str(e), # <--- O ERRO VAI APARECER AQUI
+                    "saldo_dia": "!"
+                }
+            ]
         })
