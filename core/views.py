@@ -15,7 +15,7 @@ class StatusPontoView(APIView):
 
     def get(self, request):
         usuario = request.user
-        hoje = timezone.now().date()
+        hoje = timezone.localdate()  # <--- Isso força pegar a data do Brasil
         
         registros_hoje = RegistroPonto.objects.filter(
             usuario=usuario, 
