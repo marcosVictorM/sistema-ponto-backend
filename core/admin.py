@@ -1,26 +1,23 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-# ATENÇÃO: Importe apenas Usuario, não CustomUser
 from .models import Usuario, Empresa, RegistroPonto, Escala
 
 @admin.register(Escala)
 class EscalaAdmin(admin.ModelAdmin):
     list_display = ('nome', 'carga_horaria_diaria', 'trabalha_sabado', 'trabalha_domingo')
     list_filter = ('trabalha_sabado', 'trabalha_domingo')
+    search_fields = ('nome',)
 
-# Atualizando o Admin do USUARIO
-class UsuarioAdmin(UserAdmin): # Mudei o nome para não confundir
+class UsuarioAdmin(UserAdmin):
     model = Usuario
     
-    # Adicionamos os campos novos na lista
     list_display = ('username', 'email', 'empresa', 'escala', 'usar_configuracao_individual', 'is_staff')
-    
-    # Adicionamos os filtros novos
     list_filter = ('empresa', 'escala', 'usar_configuracao_individual', 'is_staff')
 
     fieldsets = UserAdmin.fieldsets + (
         ('Informações Profissionais', {
-            'fields': ('empresa', 'tipo', 'carga_horaria', 'trabalho_hibrido')
+            # PADRONIZADO: carga_horaria_diaria
+            'fields': ('empresa', 'tipo', 'carga_horaria_diaria', 'trabalho_hibrido')
         }),
         ('Configuração de Escala (Grupo)', {
             'fields': ('escala',),
@@ -49,7 +46,6 @@ class RegistroPontoAdmin(admin.ModelAdmin):
         return obj.get_tipo_display()
     tipo_formatado.short_description = 'Tipo'
 
-# REGISTRE O USUARIO COM A CLASSE NOVA
 admin.site.register(Usuario, UsuarioAdmin)
 admin.site.register(Empresa)
 admin.site.register(RegistroPonto, RegistroPontoAdmin)

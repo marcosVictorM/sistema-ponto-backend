@@ -4,7 +4,7 @@ from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
 from datetime import timedelta
 
-# --- 1. MODELO BASE (Mantido) ---
+# --- 1. MODELO BASE ---
 class ModeloBase(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     criado_em = models.DateTimeField(auto_now_add=True)
@@ -13,11 +13,10 @@ class ModeloBase(models.Model):
     class Meta:
         abstract = True
 
-# --- 2. EMPRESA (Mantido) ---
+# --- 2. EMPRESA ---
 class Empresa(ModeloBase):
     nome = models.CharField(max_length=255)
     cnpj = models.CharField(max_length=18, unique=True)
-    # Configurações de Ponto da Empresa
     latitude_escritorio = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude_escritorio = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     raio_permitido_metros = models.IntegerField(default=50, help_text="Raio em metros para permitir o ponto")
@@ -25,10 +24,10 @@ class Empresa(ModeloBase):
     def __str__(self):
         return self.nome
 
-# --- 3. NOVA CLASSE: ESCALA (Grupo de Configuração) ---
+# --- 3. ESCALA (Grupo de Configuração) ---
 class Escala(ModeloBase):
     nome = models.CharField(max_length=50, unique=True, help_text="Ex: Administrativo (Seg-Sex), Escala 12x36")
-    # Usamos DurationField para compatibilidade com o seu Usuario existente
+    # DurationField é o correto para "quantidade de tempo" (ex: 8 horas)
     carga_horaria_diaria = models.DurationField(default=timedelta(hours=8), help_text="Carga horária padrão (Ex: 08:00:00)")
     
     # Dias de Trabalho da Escala
@@ -43,15 +42,11 @@ class Escala(ModeloBase):
     def __str__(self):
         return self.nome
 
-# --- 4. USUARIO (Atualizado com os novos campos) ---
+# --- 4. USUARIO ---
 class Usuario(AbstractUser):
-    # ID UUID
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    
-    # Vínculo com a empresa
     empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name='funcionarios', null=True, blank=True)
     
-    # Tipos de usuário
     TIPO_CHOICES = (
         ('ADMIN', 'Administrador'),
         ('FUNCIONARIO', 'Funcionário'),
@@ -59,17 +54,13 @@ class Usuario(AbstractUser):
     tipo = models.CharField(max_length=20, choices=TIPO_CHOICES, default='FUNCIONARIO')
     
     # --- CONFIGURAÇÃO DE JORNADA ---
-    
-    # 1. Carga Horária (Se preenchida aqui, vence a da Escala)
+    # CAMPO PADRONIZADO: carga_horaria_diaria
     carga_horaria_diaria = models.DurationField(null=True, blank=True, help_text="Ex: 08:00:00. Se vazio, usa a da Escala.")
     
-    # 2. Vínculo com Escala (Opcional)
     escala = models.ForeignKey(Escala, on_delete=models.SET_NULL, null=True, blank=True, related_name="usuarios")
-    
-    # 3. Configuração Híbrida
     trabalho_hibrido = models.BooleanField(default=False, help_text="Se True, permite ponto fora do raio do escritório")
 
-    # 4. Configuração Individual (Sobrescreve a Escala)
+    # Configuração Individual
     usar_configuracao_individual = models.BooleanField(default=False, help_text="Se marcado, ignora a Escala e usa os dias abaixo.")
     
     # Dias Individuais
@@ -85,7 +76,7 @@ class Usuario(AbstractUser):
         verbose_name = 'Usuário'
         verbose_name_plural = 'Usuários'
 
-# --- 5. REGISTRO PONTO (Mantido) ---
+# --- 5. REGISTRO PONTO ---
 class RegistroPonto(ModeloBase):
     TIPO_BATIDA = (
         ('ENTRADA', 'Entrada'),
@@ -98,12 +89,10 @@ class RegistroPonto(ModeloBase):
     data_hora = models.DateTimeField(help_text="Data e hora exata do registro")
     tipo = models.CharField(max_length=20, choices=TIPO_BATIDA)
     
-    # Auditoria
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     localizacao_valida = models.BooleanField(default=False)
     
-    # Edição Manual
     editado_manualmente = models.BooleanField(default=False)
     observacao = models.TextField(blank=True, null=True)
 

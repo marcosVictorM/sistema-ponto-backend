@@ -8,13 +8,12 @@ from datetime import timedelta, datetime
 from .models import RegistroPonto
 from .serializers import RegistroPontoSerializer
 
-# --- CLASSE 1: STATUS DO DIA (Tela Principal) ---
+# --- CLASSE 1: STATUS DO DIA ---
 class StatusPontoView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         usuario = request.user
-        # FIX: Usa a data local do Brasil, não a do servidor (UTC)
         hoje = timezone.localdate()
         
         registros_hoje = RegistroPonto.objects.filter(
@@ -22,7 +21,6 @@ class StatusPontoView(APIView):
             data_hora__date=hoje
         ).order_by('data_hora')
 
-        # === LÓGICA DE CÁLCULO DE HORAS DO DIA ===
         horas_trabalhadas = timedelta(0)
         entrada_temp = None
 
@@ -39,11 +37,9 @@ class StatusPontoView(APIView):
         horas, remainder = divmod(total_segundos, 3600)
         minutos, _ = divmod(remainder, 60)
         horas_formatadas = f"{horas:02}:{minutos:02}"
-        # =========================================
 
         ultimo_registro = registros_hoje.last()
 
-        # Máquina de Estados (Define qual o próximo botão)
         if not ultimo_registro:
             proximo = 'ENTRADA'
             mensagem = 'Registrar Entrada'
@@ -68,7 +64,7 @@ class StatusPontoView(APIView):
             'horas_trabalhadas': horas_formatadas
         })
 
-# --- CLASSE 2: REGISTRAR BATIDA (Botão) ---
+# --- CLASSE 2: REGISTRAR BATIDA ---
 class RegistrarPontoView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -83,7 +79,7 @@ class RegistrarPontoView(APIView):
         novo_ponto = RegistroPonto.objects.create(
             usuario=usuario,
             tipo=tipo_enviado,
-            data_hora=timezone.now(), # Salva com fuso (UTC), o banco converte depois
+            data_hora=timezone.now(), 
             latitude=lat,
             longitude=long,
             localizacao_valida=True
@@ -91,10 +87,7 @@ class RegistrarPontoView(APIView):
         
         return Response(RegistroPontoSerializer(novo_ponto).data, status=status.HTTP_201_CREATED)
 
-# --- SUBSTITUA A ÚLTIMA FUNÇÃO POR ESTA ---
-
-# --- SUBSTITUIR A FUNÇÃO RELATORIO_MENSAL ---
-
+# --- FUNÇÃO 3: RELATÓRIO MENSAL (CORRIGIDA) ---
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def relatorio_mensal(request):
@@ -117,10 +110,9 @@ def relatorio_mensal(request):
         lista_final = []
         saldo_total = 0
         
-        # === 1. DEFINIÇÃO DA REGRA DE TRABALHO DO USUÁRIO ===
-        # Padrão Inicial (Caso não tenha nada configurado)
-        meta_padrao = 480 # 8 horas
-        dias_trabalho = [0, 1, 2, 3, 4] # Seg a Sex (0=Seg, 6=Dom)
+        # === 1. DEFINIÇÃO DA REGRA (PADRONIZADA PARA DURATIONFIELD) ===
+        meta_padrao = 480 # 8 horas em minutos
+        dias_trabalho = [0, 1, 2, 3, 4] 
 
         # A. Checa Individual
         if usuario.usar_configuracao_individual:
@@ -133,10 +125,11 @@ def relatorio_mensal(request):
             if usuario.trab_sab: dias_trabalho.append(5)
             if usuario.trab_dom: dias_trabalho.append(6)
             
-            if usuario.carga_horaria:
-                meta_padrao = (usuario.carga_horaria.hour * 60) + usuario.carga_horaria.minute
+            # MATEMÁTICA CORRIGIDA PARA DURATIONFIELD
+            if usuario.carga_horaria_diaria:
+                meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
 
-        # B. Checa Escala (Se não for individual e tiver escala)
+        # B. Checa Escala
         elif usuario.escala:
             esc = usuario.escala
             dias_trabalho = []
@@ -148,15 +141,14 @@ def relatorio_mensal(request):
             if esc.trabalha_sabado: dias_trabalho.append(5)
             if esc.trabalha_domingo: dias_trabalho.append(6)
 
-            # Carga horária: Usuário vence Escala. Escala vence Padrão.
-            if usuario.carga_horaria:
-                meta_padrao = (usuario.carga_horaria.hour * 60) + usuario.carga_horaria.minute
-            else:
-                meta_padrao = (esc.carga_horaria_diaria.hour * 60) + esc.carga_horaria_diaria.minute
+            if usuario.carga_horaria_diaria:
+                meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
+            elif esc.carga_horaria_diaria:
+                meta_padrao = int(esc.carga_horaria_diaria.total_seconds() // 60)
 
-        # C. Caso não tenha nada, mantém o padrão Seg-Sex e verifica só se usuario tem carga horaria avulsa
-        elif usuario.carga_horaria:
-             meta_padrao = (usuario.carga_horaria.hour * 60) + usuario.carga_horaria.minute
+        # C. Caso apenas Carga Horária Avulsa
+        elif usuario.carga_horaria_diaria:
+             meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
         
         # ====================================================
 
@@ -167,11 +159,10 @@ def relatorio_mensal(request):
             data_obj = datetime.strptime(data_str, '%Y-%m-%d').date()
             dia_semana = data_obj.weekday()
             
-            # Verifica se o dia atual está na lista de dias de trabalho configurada
             if dia_semana in dias_trabalho:
                 meta_dia = meta_padrao
             else:
-                meta_dia = 0 # Folga / Fim de semana
+                meta_dia = 0 
 
             minutos_trabalhados = 0
             for i in range(0, len(horarios), 2):
