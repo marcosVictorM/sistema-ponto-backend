@@ -93,89 +93,128 @@ class RegistrarPontoView(APIView):
 
 # --- SUBSTITUA A ÚLTIMA FUNÇÃO POR ESTA ---
 
+# --- SUBSTITUIR A FUNÇÃO RELATORIO_MENSAL ---
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def relatorio_mensal(request):
     try:
-        # 1. Imports de segurança (Garante que não é falta de import)
-        from .models import RegistroPonto
-        from django.utils import timezone
-        from datetime import timedelta, datetime
-        
         usuario = request.user
         hoje = timezone.localdate()
-        data_inicio = hoje - timedelta(days=30)
+        inicio = hoje - timedelta(days=30)
         
-        # 2. Busca os dados
         registros = RegistroPonto.objects.filter(
             usuario=usuario, 
-            data_hora__date__gte=data_inicio
-        ).order_by('-data_hora')
-
-        dias_trabalhados = {}
+            data_hora__date__gte=inicio
+        ).order_by('data_hora')
         
-        # 3. Processamento seguro
-        for ponto in registros:
-            # Força conversão para string para evitar erros de data
-            data_str = ponto.data_hora.astimezone().strftime('%Y-%m-%d')
+        dias = {}
+        for p in registros:
+            d_str = p.data_hora.astimezone().strftime('%Y-%m-%d')
+            if d_str not in dias: dias[d_str] = []
+            dias[d_str].append(p)
+
+        lista_final = []
+        saldo_total = 0
+        
+        # === 1. DEFINIÇÃO DA REGRA DE TRABALHO DO USUÁRIO ===
+        # Padrão Inicial (Caso não tenha nada configurado)
+        meta_padrao = 480 # 8 horas
+        dias_trabalho = [0, 1, 2, 3, 4] # Seg a Sex (0=Seg, 6=Dom)
+
+        # A. Checa Individual
+        if usuario.usar_configuracao_individual:
+            dias_trabalho = []
+            if usuario.trab_seg: dias_trabalho.append(0)
+            if usuario.trab_ter: dias_trabalho.append(1)
+            if usuario.trab_qua: dias_trabalho.append(2)
+            if usuario.trab_qui: dias_trabalho.append(3)
+            if usuario.trab_sex: dias_trabalho.append(4)
+            if usuario.trab_sab: dias_trabalho.append(5)
+            if usuario.trab_dom: dias_trabalho.append(6)
             
-            if data_str not in dias_trabalhados:
-                dias_trabalhados[data_str] = []
-            dias_trabalhados[data_str].append(ponto.data_hora)
+            if usuario.carga_horaria:
+                meta_padrao = (usuario.carga_horaria.hour * 60) + usuario.carga_horaria.minute
 
-        historico = []
-        saldo_minutos_total = 0
-        JORNADA_PADRAO = 8 * 60
+        # B. Checa Escala (Se não for individual e tiver escala)
+        elif usuario.escala:
+            esc = usuario.escala
+            dias_trabalho = []
+            if esc.trabalha_segunda: dias_trabalho.append(0)
+            if esc.trabalha_terca: dias_trabalho.append(1)
+            if esc.trabalha_quarta: dias_trabalho.append(2)
+            if esc.trabalha_quinta: dias_trabalho.append(3)
+            if esc.trabalha_sexta: dias_trabalho.append(4)
+            if esc.trabalha_sabado: dias_trabalho.append(5)
+            if esc.trabalha_domingo: dias_trabalho.append(6)
 
-        for data, horarios in dias_trabalhados.items():
+            # Carga horária: Usuário vence Escala. Escala vence Padrão.
+            if usuario.carga_horaria:
+                meta_padrao = (usuario.carga_horaria.hour * 60) + usuario.carga_horaria.minute
+            else:
+                meta_padrao = (esc.carga_horaria_diaria.hour * 60) + esc.carga_horaria_diaria.minute
+
+        # C. Caso não tenha nada, mantém o padrão Seg-Sex e verifica só se usuario tem carga horaria avulsa
+        elif usuario.carga_horaria:
+             meta_padrao = (usuario.carga_horaria.hour * 60) + usuario.carga_horaria.minute
+        
+        # ====================================================
+
+        for data_str, lista_pontos in dias.items():
+            horarios = [p.data_hora for p in lista_pontos]
             horarios.sort()
+            
+            data_obj = datetime.strptime(data_str, '%Y-%m-%d').date()
+            dia_semana = data_obj.weekday()
+            
+            # Verifica se o dia atual está na lista de dias de trabalho configurada
+            if dia_semana in dias_trabalho:
+                meta_dia = meta_padrao
+            else:
+                meta_dia = 0 # Folga / Fim de semana
+
             minutos_trabalhados = 0
-            
-            # Lógica de pares
             for i in range(0, len(horarios), 2):
-                if i + 1 < len(horarios):
-                    entrada = horarios[i]
-                    saida = horarios[i+1]
-                    # Garante que ambos são comparáveis
-                    diferenca = saida - entrada
-                    minutos_trabalhados += diferenca.total_seconds() / 60
+                if i+1 < len(horarios):
+                    delta = (horarios[i+1] - horarios[i]).total_seconds() / 60
+                    minutos_trabalhados += delta
             
-            horas = int(minutos_trabalhados // 60)
-            mins = int(minutos_trabalhados % 60)
-            tempo_formatado = f"{horas:02d}:{mins:02d}"
+            h_trab = int(minutos_trabalhados // 60)
+            m_trab = int(minutos_trabalhados % 60)
+            str_trabalhado = f"{h_trab:02d}:{m_trab:02d}"
 
-            saldo_dia_str = "Em andamento"
-            if data != str(hoje):
-                saldo_dia = minutos_trabalhados - JORNADA_PADRAO
-                saldo_minutos_total += saldo_dia
-                sinal = "+" if saldo_dia >= 0 else "-"
-                saldo_dia_str = f"{sinal}{int(abs(saldo_dia) // 60):02d}:{int(abs(saldo_dia) % 60):02d}"
+            saldo_str = "Em andamento"
+            calcular_saldo = True
+            if data_str == str(hoje):
+                ultimo_tipo = lista_pontos[-1].tipo
+                if ultimo_tipo != 'SAIDA': 
+                    calcular_saldo = False
+            
+            if calcular_saldo:
+                saldo = minutos_trabalhados - meta_dia
+                saldo_total += saldo
+                sinal = "+" if saldo >= 0 else "-"
+                saldo_abs = abs(saldo)
+                saldo_str = f"{sinal}{int(saldo_abs//60):02d}:{int(saldo_abs%60):02d}"
 
-            historico.append({
-                "data": datetime.strptime(data, '%Y-%m-%d').strftime('%d/%m'),
-                "horas_trabalhadas": tempo_formatado,
-                "saldo_dia": saldo_dia_str
+            lista_final.append({
+                "data": data_obj.strftime('%d/%m'),
+                "horas_trabalhadas": str_trabalhado,
+                "saldo_dia": saldo_str
             })
 
-        sinal_total = "+" if saldo_minutos_total >= 0 else "-"
-        saldo_total_str = f"{sinal_total}{int(abs(saldo_minutos_total) // 60):02d}:{int(abs(saldo_minutos_total) % 60):02d}"
+        sinal_t = "+" if saldo_total >= 0 else "-"
+        total_abs = abs(saldo_total)
+        total_str = f"{sinal_t}{int(total_abs//60):02d}:{int(total_abs%60):02d}"
+        
+        lista_final.sort(key=lambda x: datetime.strptime(x['data'] + '/' + str(hoje.year), '%d/%m/%Y'), reverse=True)
 
-        return Response({
-            "saldo_banco_horas": saldo_total_str,
-            "historico": historico
-        })
+        return Response({"saldo_banco_horas": total_str, "historico": lista_final})
 
     except Exception as e:
-        # AQUI O SEGREDO: Se der erro, ele devolve o erro no lugar do histórico
         import traceback
-        print(traceback.format_exc()) # Tenta imprimir no log
+        print(traceback.format_exc())
         return Response({
             "saldo_banco_horas": "ERRO",
-            "historico": [
-                {
-                    "data": "ERRO CRÍTICO", 
-                    "horas_trabalhadas": str(e), # <--- O ERRO VAI APARECER AQUI
-                    "saldo_dia": "!"
-                }
-            ]
+            "historico": [{"data": "ALERTA", "horas_trabalhadas": "Erro", "saldo_dia": str(e)}]
         })
