@@ -1,13 +1,22 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Usuario, Empresa, RegistroPonto, Escala
+from .models import Usuario, Empresa, RegistroPonto, Escala, Feriado
 
+# --- CONFIGURAÇÃO DE ESCALA ---
 @admin.register(Escala)
 class EscalaAdmin(admin.ModelAdmin):
     list_display = ('nome', 'carga_horaria_diaria', 'trabalha_sabado', 'trabalha_domingo')
     list_filter = ('trabalha_sabado', 'trabalha_domingo')
     search_fields = ('nome',)
 
+# --- CONFIGURAÇÃO DE FERIADO (NOVO) ---
+@admin.register(Feriado)
+class FeriadoAdmin(admin.ModelAdmin):
+    list_display = ('nome', 'data', 'empresa')
+    list_filter = ('empresa', 'data')
+    search_fields = ('nome',)
+
+# --- CONFIGURAÇÃO DE USUÁRIO ---
 class UsuarioAdmin(UserAdmin):
     model = Usuario
     
@@ -16,7 +25,6 @@ class UsuarioAdmin(UserAdmin):
 
     fieldsets = UserAdmin.fieldsets + (
         ('Informações Profissionais', {
-            # PADRONIZADO: carga_horaria_diaria
             'fields': ('empresa', 'tipo', 'carga_horaria_diaria', 'data_inicio_apuracao', 'trabalho_hibrido')
         }),
         ('Configuração de Escala (Grupo)', {
@@ -33,6 +41,7 @@ class UsuarioAdmin(UserAdmin):
         }),
     )
 
+# --- CONFIGURAÇÃO DE PONTO ---
 class RegistroPontoAdmin(admin.ModelAdmin):
     list_display = ('usuario', 'tipo_formatado', 'data_hora_local', 'localizacao_valida')
     list_filter = ('usuario', 'tipo', 'data_hora', 'localizacao_valida')
@@ -46,6 +55,7 @@ class RegistroPontoAdmin(admin.ModelAdmin):
         return obj.get_tipo_display()
     tipo_formatado.short_description = 'Tipo'
 
+# Registros Finais
 admin.site.register(Usuario, UsuarioAdmin)
 admin.site.register(Empresa)
 admin.site.register(RegistroPonto, RegistroPontoAdmin)

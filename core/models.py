@@ -80,7 +80,17 @@ class Usuario(AbstractUser):
     class Meta:
         verbose_name = 'Usuário'
         verbose_name_plural = 'Usuários'
+class Feriado(ModeloBase):
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name='feriados')
+    data = models.DateField()
+    nome = models.CharField(max_length=100, help_text="Ex: Natal, Consciência Negra")
 
+    class Meta:
+        ordering = ['data']
+        unique_together = ('empresa', 'data') # Não deixa cadastrar o mesmo feriado 2x na mesma empresa
+
+    def __str__(self):
+        return f"{self.data.strftime('%d/%m')} - {self.nome}"
 # --- 5. REGISTRO PONTO ---
 class RegistroPonto(ModeloBase):
     TIPO_BATIDA = (
