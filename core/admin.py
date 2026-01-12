@@ -17,7 +17,7 @@ class UsuarioAdmin(UserAdmin):
     fieldsets = UserAdmin.fieldsets + (
         ('Informações Profissionais', {
             # PADRONIZADO: carga_horaria_diaria
-            'fields': ('empresa', 'tipo', 'carga_horaria_diaria', 'trabalho_hibrido')
+            'fields': ('empresa', 'tipo', 'carga_horaria_diaria', 'data_inicio_apuracao', 'trabalho_hibrido')
         }),
         ('Configuração de Escala (Grupo)', {
             'fields': ('escala',),

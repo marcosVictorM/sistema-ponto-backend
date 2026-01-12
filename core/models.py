@@ -57,6 +57,11 @@ class Usuario(AbstractUser):
     # CAMPO PADRONIZADO: carga_horaria_diaria
     carga_horaria_diaria = models.DurationField(null=True, blank=True, help_text="Ex: 08:00:00. Se vazio, usa a da Escala.")
     
+    data_inicio_apuracao = models.DateField(
+        null=True, 
+        blank=True, 
+        help_text="Data inicial para cálculo do Banco de Horas. Registros anteriores a esta data serão ignorados."
+    )
     escala = models.ForeignKey(Escala, on_delete=models.SET_NULL, null=True, blank=True, related_name="usuarios")
     trabalho_hibrido = models.BooleanField(default=False, help_text="Se True, permite ponto fora do raio do escritório")
 

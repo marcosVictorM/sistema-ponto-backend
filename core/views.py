@@ -87,18 +87,24 @@ class RegistrarPontoView(APIView):
         
         return Response(RegistroPontoSerializer(novo_ponto).data, status=status.HTTP_201_CREATED)
 
-# --- FUNÇÃO 3: RELATÓRIO MENSAL (CORRIGIDA) ---
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def relatorio_mensal(request):
     try:
         usuario = request.user
         hoje = timezone.localdate()
-        inicio = hoje - timedelta(days=30)
         
+        if usuario.data_inicio_apuracao:
+            # Se tiver data configurada, pega de lá pra frente
+            inicio_calculo = usuario.data_inicio_apuracao
+        else:
+            # Se não tiver, pega TUDO (pode colocar uma data muito antiga por segurança)
+            inicio_calculo = datetime(2000, 1, 1).date()
+
+        # Busca registros filtrando pela data de início
         registros = RegistroPonto.objects.filter(
-            usuario=usuario, 
-            data_hora__date__gte=inicio
+            usuario=usuario,
+            data_hora__date__gte=inicio_calculo 
         ).order_by('data_hora')
         
         dias = {}
@@ -108,13 +114,13 @@ def relatorio_mensal(request):
             dias[d_str].append(p)
 
         lista_final = []
-        saldo_total = 0
+        saldo_total = 0 # Acumula o saldo de TODOS os tempos
         
-        # === 1. DEFINIÇÃO DA REGRA (PADRONIZADA PARA DURATIONFIELD) ===
-        meta_padrao = 480 # 8 horas em minutos
+        # === 2. DEFINIÇÃO DA REGRA DE TRABALHO ===
+        meta_padrao = 480 
         dias_trabalho = [0, 1, 2, 3, 4] 
 
-        # A. Checa Individual
+        # Regras de Individual e Escala (Mantidas iguais)
         if usuario.usar_configuracao_individual:
             dias_trabalho = []
             if usuario.trab_seg: dias_trabalho.append(0)
@@ -124,12 +130,9 @@ def relatorio_mensal(request):
             if usuario.trab_sex: dias_trabalho.append(4)
             if usuario.trab_sab: dias_trabalho.append(5)
             if usuario.trab_dom: dias_trabalho.append(6)
-            
-            # MATEMÁTICA CORRIGIDA PARA DURATIONFIELD
             if usuario.carga_horaria_diaria:
                 meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
 
-        # B. Checa Escala
         elif usuario.escala:
             esc = usuario.escala
             dias_trabalho = []
@@ -146,12 +149,12 @@ def relatorio_mensal(request):
             elif esc.carga_horaria_diaria:
                 meta_padrao = int(esc.carga_horaria_diaria.total_seconds() // 60)
 
-        # C. Caso apenas Carga Horária Avulsa
         elif usuario.carga_horaria_diaria:
              meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
         
         # ====================================================
 
+        # 3. PROCESSA DIA A DIA (Desde o início)
         for data_str, lista_pontos in dias.items():
             horarios = [p.data_hora for p in lista_pontos]
             horarios.sort()
@@ -170,10 +173,6 @@ def relatorio_mensal(request):
                     delta = (horarios[i+1] - horarios[i]).total_seconds() / 60
                     minutos_trabalhados += delta
             
-            h_trab = int(minutos_trabalhados // 60)
-            m_trab = int(minutos_trabalhados % 60)
-            str_trabalhado = f"{h_trab:02d}:{m_trab:02d}"
-
             saldo_str = "Em andamento"
             calcular_saldo = True
             if data_str == str(hoje):
@@ -181,18 +180,27 @@ def relatorio_mensal(request):
                 if ultimo_tipo != 'SAIDA': 
                     calcular_saldo = False
             
+            # Acumula no Saldo Total (Sempre executa, independente do mês)
             if calcular_saldo:
                 saldo = minutos_trabalhados - meta_dia
                 saldo_total += saldo
+                
                 sinal = "+" if saldo >= 0 else "-"
                 saldo_abs = abs(saldo)
                 saldo_str = f"{sinal}{int(saldo_abs//60):02d}:{int(saldo_abs%60):02d}"
 
-            lista_final.append({
-                "data": data_obj.strftime('%d/%m'),
-                "horas_trabalhadas": str_trabalhado,
-                "saldo_dia": saldo_str
-            })
+            # 4. FILTRO VISUAL: Só adiciona na lista se for do MÊS ATUAL
+            # (Ou seja, o saldo contabilizou o passado, mas a lista esconde)
+            if data_obj.month == hoje.month and data_obj.year == hoje.year:
+                h_trab = int(minutos_trabalhados // 60)
+                m_trab = int(minutos_trabalhados % 60)
+                str_trabalhado = f"{h_trab:02d}:{m_trab:02d}"
+
+                lista_final.append({
+                    "data": data_obj.strftime('%d/%m'),
+                    "horas_trabalhadas": str_trabalhado,
+                    "saldo_dia": saldo_str
+                })
 
         sinal_t = "+" if saldo_total >= 0 else "-"
         total_abs = abs(saldo_total)
