@@ -5,7 +5,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework import status
 from django.utils import timezone
 from datetime import timedelta, datetime
-from .models import RegistroPonto, Feriado
+from .models import RegistroPonto, Feriado, Recesso
 from .serializers import RegistroPontoSerializer
 
 # --- CLASSE 1: STATUS DO DIA ---
@@ -94,37 +94,44 @@ def relatorio_mensal(request):
         usuario = request.user
         hoje = timezone.localdate()
         
-        # 1. Filtro de Data de Início
+        # 1. Filtro de Data de Início (Data de Apuração)
         if usuario.data_inicio_apuracao:
             inicio_calculo = usuario.data_inicio_apuracao
         else:
             inicio_calculo = datetime(2000, 1, 1).date()
 
+        # Busca registros
         registros = RegistroPonto.objects.filter(
             usuario=usuario,
             data_hora__date__gte=inicio_calculo 
         ).order_by('data_hora')
         
+        # Organiza por dia
         dias = {}
         for p in registros:
             d_str = p.data_hora.astimezone().strftime('%Y-%m-%d')
             if d_str not in dias: dias[d_str] = []
             dias[d_str].append(p)
 
-        # === NOVO: BUSCA FERIADOS DA EMPRESA ===
+        # === BUSCA EXCEÇÕES (FERIADOS E RECESSOS) ===
         lista_feriados = []
+        lista_recessos = [] 
+        
         if usuario.empresa:
-            # Pega apenas as datas dos feriados cadastrados para a empresa desse usuario
+            # Pega datas de feriados simples
             lista_feriados = Feriado.objects.filter(empresa=usuario.empresa).values_list('data', flat=True)
-        # =======================================
+            # Pega objetos de recesso (para conferir intervalos depois)
+            lista_recessos = Recesso.objects.filter(empresa=usuario.empresa)
+        # ============================================
 
         lista_final = []
         saldo_total = 0 
         
-        # Definição de Regras (Mantida)
+        # === DEFINIÇÃO DE REGRAS DE JORNADA ===
         meta_padrao = 480 
         dias_trabalho = [0, 1, 2, 3, 4] 
 
+        # Regra 1: Configuração Individual
         if usuario.usar_configuracao_individual:
             dias_trabalho = []
             if usuario.trab_seg: dias_trabalho.append(0)
@@ -137,6 +144,7 @@ def relatorio_mensal(request):
             if usuario.carga_horaria_diaria:
                 meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
 
+        # Regra 2: Escala
         elif usuario.escala:
             esc = usuario.escala
             dias_trabalho = []
@@ -153,10 +161,11 @@ def relatorio_mensal(request):
             elif esc.carga_horaria_diaria:
                 meta_padrao = int(esc.carga_horaria_diaria.total_seconds() // 60)
 
+        # Regra 3: Padrão com Carga Horária Avulsa
         elif usuario.carga_horaria_diaria:
              meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
         
-        # Processamento
+        # === PROCESSAMENTO DIA A DIA ===
         for data_str, lista_pontos in dias.items():
             horarios = [p.data_hora for p in lista_pontos]
             horarios.sort()
@@ -164,26 +173,41 @@ def relatorio_mensal(request):
             data_obj = datetime.strptime(data_str, '%Y-%m-%d').date()
             dia_semana = data_obj.weekday()
             
-            # === NOVA LÓGICA DE FERIADO ===
-            eh_feriado = data_obj in lista_feriados
+            # === LÓGICA DE FOLGA (FERIADO OU RECESSO) ===
+            eh_folga = False
+            nome_motivo = ""
+
+            # 1. Verifica Feriado (Dia exato)
+            if data_obj in lista_feriados:
+                eh_folga = True
+                nome_motivo = "(Feriado)"
             
-            if eh_feriado:
-                # Se é feriado, a meta é ZERO (não deve horas)
-                meta_dia = 0
+            # 2. Verifica Recesso (Intervalo de datas)
+            # Só verifica se já não for feriado para economizar processamento
+            if not eh_folga:
+                for recesso in lista_recessos:
+                    if recesso.data_inicio <= data_obj <= recesso.data_fim:
+                        eh_folga = True
+                        nome_motivo = "(Recesso)"
+                        break # Achou, para de procurar
+            
+            # Define a Meta do Dia
+            if eh_folga:
+                meta_dia = 0 # Meta zerada, não desconta nada
             elif dia_semana in dias_trabalho:
-                # Se não é feriado e é dia util, usa a meta normal
                 meta_dia = meta_padrao
             else:
-                # Fim de semana normal
-                meta_dia = 0 
-            # ==============================
+                meta_dia = 0 # Fim de semana comum
+            # ============================================
 
+            # Calcula horas trabalhadas
             minutos_trabalhados = 0
             for i in range(0, len(horarios), 2):
                 if i+1 < len(horarios):
                     delta = (horarios[i+1] - horarios[i]).total_seconds() / 60
                     minutos_trabalhados += delta
             
+            # Lógica do Saldo
             saldo_str = "Em andamento"
             calcular_saldo = True
             if data_str == str(hoje):
@@ -199,16 +223,16 @@ def relatorio_mensal(request):
                 saldo_abs = abs(saldo)
                 saldo_str = f"{sinal}{int(saldo_abs//60):02d}:{int(saldo_abs%60):02d}"
 
+            # Filtro Visual: Só adiciona na lista se for do Mês Atual
             if data_obj.month == hoje.month and data_obj.year == hoje.year:
                 h_trab = int(minutos_trabalhados // 60)
                 m_trab = int(minutos_trabalhados % 60)
                 str_trabalhado = f"{h_trab:02d}:{m_trab:02d}"
 
-                # Adiciona um ícone ou texto avisando que foi feriado (Opcional, mas legal)
-                if eh_feriado:
-                    data_fmt = f"{data_obj.strftime('%d/%m')} (Feriado)"
-                else:
-                    data_fmt = data_obj.strftime('%d/%m')
+                # Formata a data para aparecer o motivo (ex: "25/12 (Feriado)")
+                data_fmt = data_obj.strftime('%d/%m')
+                if eh_folga:
+                    data_fmt += f" {nome_motivo}"
 
                 lista_final.append({
                     "data": data_fmt,
@@ -220,6 +244,7 @@ def relatorio_mensal(request):
         total_abs = abs(saldo_total)
         total_str = f"{sinal_t}{int(total_abs//60):02d}:{int(total_abs%60):02d}"
         
+        # Ordena a lista visual
         lista_final.sort(key=lambda x: datetime.strptime(x['data'].split(' ')[0] + '/' + str(hoje.year), '%d/%m/%Y'), reverse=True)
 
         return Response({"saldo_banco_horas": total_str, "historico": lista_final})

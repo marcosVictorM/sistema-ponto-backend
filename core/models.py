@@ -91,6 +91,19 @@ class Feriado(ModeloBase):
 
     def __str__(self):
         return f"{self.data.strftime('%d/%m')} - {self.nome}"
+
+class Recesso(ModeloBase):
+    empresa = models.ForeignKey(Empresa, on_delete=models.CASCADE, related_name='recessos')
+    nome = models.CharField(max_length=100, help_text="Ex: Recesso de Fim de Ano, Férias Coletivas")
+    data_inicio = models.DateField()
+    data_fim = models.DateField()
+
+    class Meta:
+        ordering = ['data_inicio']
+
+    def __str__(self):
+        return f"{self.nome} ({self.data_inicio.strftime('%d/%m')} a {self.data_fim.strftime('%d/%m')})"
+   
 # --- 5. REGISTRO PONTO ---
 class RegistroPonto(ModeloBase):
     TIPO_BATIDA = (

@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Usuario, Empresa, RegistroPonto, Escala, Feriado
+from .models import Usuario, Empresa, RegistroPonto, Escala, Feriado, Recesso
 
 # --- CONFIGURAÇÃO DE ESCALA ---
 @admin.register(Escala)
@@ -9,12 +9,19 @@ class EscalaAdmin(admin.ModelAdmin):
     list_filter = ('trabalha_sabado', 'trabalha_domingo')
     search_fields = ('nome',)
 
-# --- CONFIGURAÇÃO DE FERIADO (NOVO) ---
+# --- CONFIGURAÇÃO DE FERIADO  ---
 @admin.register(Feriado)
 class FeriadoAdmin(admin.ModelAdmin):
     list_display = ('nome', 'data', 'empresa')
     list_filter = ('empresa', 'data')
     search_fields = ('nome',)
+
+# --- CONFIGURAÇÃO DE RECESSO  ---
+@admin.register(Recesso)
+class RecessoAdmin(admin.ModelAdmin):
+    list_display = ('nome', 'data_inicio', 'data_fim', 'empresa')
+    list_filter = ('empresa',)
+    search_fields = ('nome',)    
 
 # --- CONFIGURAÇÃO DE USUÁRIO ---
 class UsuarioAdmin(UserAdmin):
