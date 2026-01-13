@@ -5,7 +5,7 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework import status
 from django.utils import timezone
 from datetime import timedelta, datetime
-from .models import RegistroPonto
+from .models import RegistroPonto, Feriado
 from .serializers import RegistroPontoSerializer
 
 # --- CLASSE 1: STATUS DO DIA ---
