@@ -5,5 +5,5 @@ urlpatterns = [
     path('status/', StatusPontoView.as_view(), name='status-ponto'),
     path('registrar/', RegistrarPontoView.as_view(), name='registrar-ponto'),
     path('historico/', relatorio_mensal, name='historico'), 
-    path('api/relatorio-pdf/', gerar_relatorio_pdf, name='relatorio_pdf'),
+    path('relatorio-pdf/', gerar_relatorio_pdf, name='relatorio_pdf'),
 ]
