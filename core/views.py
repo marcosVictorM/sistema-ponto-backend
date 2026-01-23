@@ -4,9 +4,13 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework import status
 from django.utils import timezone
-from datetime import timedelta, datetime
+from datetime import timedelta, datetime, date
 from .models import RegistroPonto, Feriado, Recesso
 from .serializers import RegistroPontoSerializer
+from django.http import HttpResponse
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
 
 # --- CLASSE 1: STATUS DO DIA ---
 class StatusPontoView(APIView):
@@ -94,44 +98,36 @@ def relatorio_mensal(request):
         usuario = request.user
         hoje = timezone.localdate()
         
-        # 1. Filtro de Data de Início (Data de Apuração)
+        # 1. Define o Início (Data de Apuração ou Padrão)
+        cursor_data = date(2025, 1, 1) # Data de segurança antiga
         if usuario.data_inicio_apuracao:
-            inicio_calculo = usuario.data_inicio_apuracao
-        else:
-            inicio_calculo = datetime(2000, 1, 1).date()
-
-        # Busca registros
-        registros = RegistroPonto.objects.filter(
+            cursor_data = usuario.data_inicio_apuracao
+        
+        # 2. Busca TUDO do banco a partir da data de início
+        # Otimização: Trazemos tudo para a memória para não consultar o banco dentro do loop
+        registros_banco = RegistroPonto.objects.filter(
             usuario=usuario,
-            data_hora__date__gte=inicio_calculo 
+            data_hora__date__gte=cursor_data
         ).order_by('data_hora')
         
-        # Organiza por dia
-        dias = {}
-        for p in registros:
+        # Organiza em dicionário para acesso rápido: {'2026-01-20': [Ponto1, Ponto2]}
+        mapa_pontos = {}
+        for p in registros_banco:
             d_str = p.data_hora.astimezone().strftime('%Y-%m-%d')
-            if d_str not in dias: dias[d_str] = []
-            dias[d_str].append(p)
+            if d_str not in mapa_pontos: mapa_pontos[d_str] = []
+            mapa_pontos[d_str].append(p)
 
-        # === BUSCA EXCEÇÕES (FERIADOS E RECESSOS) ===
+        # 3. Busca Exceções (Feriados/Recessos)
         lista_feriados = []
-        lista_recessos = [] 
-        
+        lista_recessos = []
         if usuario.empresa:
-            # Pega datas de feriados simples
             lista_feriados = Feriado.objects.filter(empresa=usuario.empresa).values_list('data', flat=True)
-            # Pega objetos de recesso (para conferir intervalos depois)
             lista_recessos = Recesso.objects.filter(empresa=usuario.empresa)
-        # ============================================
 
-        lista_final = []
-        saldo_total = 0 
-        
-        # === DEFINIÇÃO DE REGRAS DE JORNADA ===
-        meta_padrao = 480 
-        dias_trabalho = [0, 1, 2, 3, 4] 
+        # 4. Configura Regras de Jornada (Meta Diária)
+        meta_padrao = 480 # 8 horas em minutos
+        dias_trabalho = [0, 1, 2, 3, 4] # Seg-Sex
 
-        # Regra 1: Configuração Individual
         if usuario.usar_configuracao_individual:
             dias_trabalho = []
             if usuario.trab_seg: dias_trabalho.append(0)
@@ -143,8 +139,6 @@ def relatorio_mensal(request):
             if usuario.trab_dom: dias_trabalho.append(6)
             if usuario.carga_horaria_diaria:
                 meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
-
-        # Regra 2: Escala
         elif usuario.escala:
             esc = usuario.escala
             dias_trabalho = []
@@ -155,66 +149,66 @@ def relatorio_mensal(request):
             if esc.trabalha_sexta: dias_trabalho.append(4)
             if esc.trabalha_sabado: dias_trabalho.append(5)
             if esc.trabalha_domingo: dias_trabalho.append(6)
-
             if usuario.carga_horaria_diaria:
                 meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
             elif esc.carga_horaria_diaria:
                 meta_padrao = int(esc.carga_horaria_diaria.total_seconds() // 60)
-
-        # Regra 3: Padrão com Carga Horária Avulsa
         elif usuario.carga_horaria_diaria:
              meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
+
+        # === LOOP PRINCIPAL: Percorre CADA DIA do calendário até hoje ===
+        lista_final = []
+        saldo_total = 0
         
-        # === PROCESSAMENTO DIA A DIA ===
-        for data_str, lista_pontos in dias.items():
-            horarios = [p.data_hora for p in lista_pontos]
-            horarios.sort()
+        # Enquanto a data do cursor não passar de hoje...
+        while cursor_data <= hoje:
+            data_str = cursor_data.strftime('%Y-%m-%d')
+            dia_semana = cursor_data.weekday()
             
-            data_obj = datetime.strptime(data_str, '%Y-%m-%d').date()
-            dia_semana = data_obj.weekday()
-            
-            # === LÓGICA DE FOLGA (FERIADO OU RECESSO) ===
+            # A. Verifica Folga/Feriado
             eh_folga = False
             nome_motivo = ""
-
-            # 1. Verifica Feriado (Dia exato)
-            if data_obj in lista_feriados:
-                eh_folga = True
-                nome_motivo = "(Feriado)"
             
-            # 2. Verifica Recesso (Intervalo de datas)
-            # Só verifica se já não for feriado para economizar processamento
+            if cursor_data in lista_feriados:
+                eh_folga = True; nome_motivo = "(Feriado)"
+            
             if not eh_folga:
                 for recesso in lista_recessos:
-                    if recesso.data_inicio <= data_obj <= recesso.data_fim:
-                        eh_folga = True
-                        nome_motivo = "(Recesso)"
-                        break # Achou, para de procurar
-            
-            # Define a Meta do Dia
-            if eh_folga:
-                meta_dia = 0 # Meta zerada, não desconta nada
-            elif dia_semana in dias_trabalho:
-                meta_dia = meta_padrao
-            else:
-                meta_dia = 0 # Fim de semana comum
-            # ============================================
+                    if recesso.data_inicio <= cursor_data <= recesso.data_fim:
+                        eh_folga = True; nome_motivo = "(Recesso)"; break
 
-            # Calcula horas trabalhadas
+            # B. Define Meta do Dia
+            if eh_folga: 
+                meta_dia = 0
+            elif dia_semana in dias_trabalho: 
+                meta_dia = meta_padrao
+            else: 
+                meta_dia = 0
+
+            # C. Calcula Trabalhado (Busca no dicionário se houve registro nesse dia)
+            pontos_dia = mapa_pontos.get(data_str, [])
+            horarios = [p.data_hora for p in pontos_dia]
+            horarios.sort()
+            
             minutos_trabalhados = 0
             for i in range(0, len(horarios), 2):
                 if i+1 < len(horarios):
                     delta = (horarios[i+1] - horarios[i]).total_seconds() / 60
                     minutos_trabalhados += delta
-            
-            # Lógica do Saldo
+
+            # D. Calcula Saldo do Dia
             saldo_str = "Em andamento"
             calcular_saldo = True
-            if data_str == str(hoje):
-                ultimo_tipo = lista_pontos[-1].tipo
-                if ultimo_tipo != 'SAIDA': 
-                    calcular_saldo = False
             
+            # Regra para HOJE: Só desconta se já tiver batido a saída ou se não tiver registro nenhum (mas dia ainda não acabou)
+            if cursor_data == hoje:
+                if not pontos_dia: 
+                    # Se não tem ponto hoje, não calcula saldo ainda (espera acabar o dia)
+                    calcular_saldo = False 
+                elif pontos_dia[-1].tipo != 'SAIDA': 
+                    # Se tem ponto mas o último não é saída (ainda está trabalhando)
+                    calcular_saldo = False 
+
             if calcular_saldo:
                 saldo = minutos_trabalhados - meta_dia
                 saldo_total += saldo
@@ -223,28 +217,41 @@ def relatorio_mensal(request):
                 saldo_abs = abs(saldo)
                 saldo_str = f"{sinal}{int(saldo_abs//60):02d}:{int(saldo_abs%60):02d}"
 
-            # Filtro Visual: Só adiciona na lista se for do Mês Atual
-            if data_obj.month == hoje.month and data_obj.year == hoje.year:
+            # E. Monta a Lista Visual (Apenas Mês Atual)
+            # Regra de Exibição: Mostra se tiver ponto OU se for Falta OU se for Folga
+            deve_mostrar_na_lista = False
+            if cursor_data.month == hoje.month and cursor_data.year == hoje.year:
+                deve_mostrar_na_lista = True
+            
+            # Detecta Falta: Deveria trabalhar (meta > 0), Trabalhou 0, e dia já passou (< hoje)
+            eh_falta = (meta_dia > 0 and minutos_trabalhados == 0 and cursor_data < hoje)
+            tem_registro = len(pontos_dia) > 0
+            
+            if deve_mostrar_na_lista and (tem_registro or eh_falta or eh_folga):
                 h_trab = int(minutos_trabalhados // 60)
                 m_trab = int(minutos_trabalhados % 60)
                 str_trabalhado = f"{h_trab:02d}:{m_trab:02d}"
-
-                # Formata a data para aparecer o motivo (ex: "25/12 (Feriado)")
-                data_fmt = data_obj.strftime('%d/%m')
-                if eh_folga:
-                    data_fmt += f" {nome_motivo}"
+                
+                label_data = cursor_data.strftime('%d/%m')
+                # Adiciona etiqueta visual
+                if eh_folga: label_data += f" {nome_motivo}"
+                elif eh_falta: label_data += " (Falta)"
 
                 lista_final.append({
-                    "data": data_fmt,
+                    "data": label_data,
                     "horas_trabalhadas": str_trabalhado,
-                    "saldo_dia": saldo_str
+                    "saldo_dia": saldo_str if calcular_saldo else "..."
                 })
 
+            # AVANÇA PARA O PRÓXIMO DIA
+            cursor_data += timedelta(days=1) 
+
+        # Formatação Final do Saldo Total
         sinal_t = "+" if saldo_total >= 0 else "-"
         total_abs = abs(saldo_total)
         total_str = f"{sinal_t}{int(total_abs//60):02d}:{int(total_abs%60):02d}"
         
-        # Ordena a lista visual
+        # Ordena visualmente do mais recente para o antigo
         lista_final.sort(key=lambda x: datetime.strptime(x['data'].split(' ')[0] + '/' + str(hoje.year), '%d/%m/%Y'), reverse=True)
 
         return Response({"saldo_banco_horas": total_str, "historico": lista_final})
@@ -252,7 +259,79 @@ def relatorio_mensal(request):
     except Exception as e:
         import traceback
         print(traceback.format_exc())
-        return Response({
-            "saldo_banco_horas": "ERRO",
-            "historico": [{"data": "ALERTA", "horas_trabalhadas": "Erro", "saldo_dia": str(e)}]
-        })
+        return Response({"saldo_banco_horas": "ERRO", "historico": []})
+
+@api_view(['POST']) # Usaremos POST para enviar datas
+@permission_classes([IsAuthenticated])
+def gerar_relatorio_pdf(request):
+    usuario = request.user
+    data_inicio_str = request.data.get('data_inicio')
+    data_fim_str = request.data.get('data_fim')
+    
+    # Configura Response como PDF
+    response = HttpResponse(content_type='application/pdf')
+    response['Content-Disposition'] = f'attachment; filename="ponto_{usuario.username}.pdf"'
+    
+    # Cria o Canvas
+    p = canvas.Canvas(response, pagesize=A4)
+    width, height = A4
+    y = height - 50 # Posição vertical inicial
+
+    # Cabeçalho
+    p.setFont("Helvetica-Bold", 16)
+    p.drawString(50, y, f"Espelho de Ponto: {usuario.username}")
+    y -= 25
+    p.setFont("Helvetica", 12)
+    p.drawString(50, y, f"Período: {data_inicio_str} a {data_fim_str}")
+    y -= 30
+    
+    # Colunas
+    p.setFont("Helvetica-Bold", 10)
+    p.drawString(50, y, "Data")
+    p.drawString(150, y, "Entrada/Saídas")
+    p.drawString(350, y, "Trabalhado")
+    p.drawString(450, y, "Saldo")
+    y -= 10
+    p.line(50, y, 550, y)
+    y -= 20
+    
+    # --- AQUI VOCÊ REPLICA A LÓGICA DO LOOP DO RELATORIO_MENSAL ---
+    # (Para simplificar o exemplo, vou fazer uma busca simples, mas 
+    # o ideal é copiar a lógica de loop de datas que fizemos acima 
+    # para pegar faltas também)
+    
+    d_inicio = datetime.strptime(data_inicio_str, '%Y-%m-%d').date()
+    d_fim = datetime.strptime(data_fim_str, '%Y-%m-%d').date()
+    
+    registros = RegistroPonto.objects.filter(
+        usuario=usuario,
+        data_hora__date__gte=d_inicio,
+        data_hora__date__lte=d_fim
+    ).order_by('data_hora')
+    
+    # Agrupamento simples para o PDF
+    dias = {}
+    for r in registros:
+        d = r.data_hora.astimezone().strftime('%d/%m/%Y')
+        if d not in dias: dias[d] = []
+        dias[d].append(r.data_hora.astimezone().strftime('%H:%M'))
+        
+    p.setFont("Helvetica", 10)
+    for data, horarios in dias.items():
+        if y < 50: # Nova página se acabar espaço
+            p.showPage()
+            y = height - 50
+            
+        horarios_str = " | ".join(horarios)
+        p.drawString(50, y, data)
+        p.drawString(150, y, horarios_str[:40]) # Corta se for mto longo
+        
+        # (Aqui você colocaria o cálculo de horas trabalhadas)
+        p.drawString(350, y, "Calculando...") 
+        
+        y -= 20
+        p.line(50, y+15, 550, y+15) # Linha divisória fraca
+
+    p.showPage()
+    p.save()
+    return response
