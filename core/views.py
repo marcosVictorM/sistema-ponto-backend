@@ -261,76 +261,182 @@ def relatorio_mensal(request):
         print(traceback.format_exc())
         return Response({"saldo_banco_horas": "ERRO", "historico": []})
 
-@api_view(['POST']) # Usaremos POST para enviar datas
+@api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def gerar_relatorio_pdf(request):
     usuario = request.user
     data_inicio_str = request.data.get('data_inicio')
     data_fim_str = request.data.get('data_fim')
     
+    # Converte strings para date
+    d_inicio = datetime.strptime(data_inicio_str, '%Y-%m-%d').date()
+    d_fim = datetime.strptime(data_fim_str, '%Y-%m-%d').date()
+
     # Configura Response como PDF
     response = HttpResponse(content_type='application/pdf')
-    response['Content-Disposition'] = f'attachment; filename="ponto_{usuario.username}.pdf"'
+    # Adicionei timestamp para evitar cache
+    filename = f"ponto_{usuario.username}_{d_inicio}_{d_fim}.pdf"
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
     
     # Cria o Canvas
     p = canvas.Canvas(response, pagesize=A4)
     width, height = A4
-    y = height - 50 # Posição vertical inicial
+    y = height - 50 
 
-    # Cabeçalho
+    # --- 1. CABEÇALHO ---
     p.setFont("Helvetica-Bold", 16)
     p.drawString(50, y, f"Espelho de Ponto: {usuario.username}")
     y -= 25
     p.setFont("Helvetica", 12)
-    p.drawString(50, y, f"Período: {data_inicio_str} a {data_fim_str}")
+    p.drawString(50, y, f"Período: {d_inicio.strftime('%d/%m/%Y')} a {d_fim.strftime('%d/%m/%Y')}")
     y -= 30
     
-    # Colunas
+    # --- 2. COLUNAS ---
     p.setFont("Helvetica-Bold", 10)
-    p.drawString(50, y, "Data")
-    p.drawString(150, y, "Entrada/Saídas")
-    p.drawString(350, y, "Trabalhado")
-    p.drawString(450, y, "Saldo")
+    p.drawString(40, y, "Data")       # Coluna 1
+    p.drawString(110, y, "Entrada/Saídas") # Coluna 2 (Mais espaço)
+    p.drawString(380, y, "Trab.")     # Coluna 3
+    p.drawString(450, y, "Saldo")      # Coluna 4
     y -= 10
-    p.line(50, y, 550, y)
-    y -= 20
+    p.line(40, y, 550, y)
+    y -= 15
     
-    # --- AQUI VOCÊ REPLICA A LÓGICA DO LOOP DO RELATORIO_MENSAL ---
-    # (Para simplificar o exemplo, vou fazer uma busca simples, mas 
-    # o ideal é copiar a lógica de loop de datas que fizemos acima 
-    # para pegar faltas também)
-    
-    d_inicio = datetime.strptime(data_inicio_str, '%Y-%m-%d').date()
-    d_fim = datetime.strptime(data_fim_str, '%Y-%m-%d').date()
-    
-    registros = RegistroPonto.objects.filter(
+    # --- 3. PREPARAÇÃO DOS DADOS (Igual ao App) ---
+    # Busca registros do período
+    registros_banco = RegistroPonto.objects.filter(
         usuario=usuario,
         data_hora__date__gte=d_inicio,
         data_hora__date__lte=d_fim
     ).order_by('data_hora')
     
-    # Agrupamento simples para o PDF
-    dias = {}
-    for r in registros:
-        d = r.data_hora.astimezone().strftime('%d/%m/%Y')
-        if d not in dias: dias[d] = []
-        dias[d].append(r.data_hora.astimezone().strftime('%H:%M'))
+    mapa_pontos = {}
+    for r in registros_banco:
+        d_str = r.data_hora.astimezone().strftime('%Y-%m-%d')
+        if d_str not in mapa_pontos: mapa_pontos[d_str] = []
+        mapa_pontos[d_str].append(r)
+
+    # Busca Exceções
+    lista_feriados = []
+    lista_recessos = []
+    if usuario.empresa:
+        lista_feriados = Feriado.objects.filter(empresa=usuario.empresa).values_list('data', flat=True)
+        lista_recessos = Recesso.objects.filter(empresa=usuario.empresa)
+
+    # Regras de Jornada
+    meta_padrao = 480 
+    dias_trabalho = [0, 1, 2, 3, 4] 
+
+    if usuario.usar_configuracao_individual:
+        dias_trabalho = []
+        if usuario.trab_seg: dias_trabalho.append(0)
+        if usuario.trab_ter: dias_trabalho.append(1)
+        if usuario.trab_qua: dias_trabalho.append(2)
+        if usuario.trab_qui: dias_trabalho.append(3)
+        if usuario.trab_sex: dias_trabalho.append(4)
+        if usuario.trab_sab: dias_trabalho.append(5)
+        if usuario.trab_dom: dias_trabalho.append(6)
+        if usuario.carga_horaria_diaria:
+            meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
+    elif usuario.escala:
+        esc = usuario.escala
+        dias_trabalho = []
+        if esc.trabalha_segunda: dias_trabalho.append(0)
+        if esc.trabalha_terca: dias_trabalho.append(1)
+        if esc.trabalha_quarta: dias_trabalho.append(2)
+        if esc.trabalha_quinta: dias_trabalho.append(3)
+        if esc.trabalha_sexta: dias_trabalho.append(4)
+        if esc.trabalha_sabado: dias_trabalho.append(5)
+        if esc.trabalha_domingo: dias_trabalho.append(6)
+        if usuario.carga_horaria_diaria:
+            meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
+        elif esc.carga_horaria_diaria:
+            meta_padrao = int(esc.carga_horaria_diaria.total_seconds() // 60)
+    elif usuario.carga_horaria_diaria:
+            meta_padrao = int(usuario.carga_horaria_diaria.total_seconds() // 60)
+
+    # --- 4. LOOP DE IMPRESSÃO (Dia a Dia) ---
+    p.setFont("Helvetica", 9) # Fonte menor para caber tudo
+    cursor = d_inicio
+    
+    while cursor <= d_fim:
+        data_str = cursor.strftime('%Y-%m-%d')
+        dia_semana = cursor.weekday()
         
-    p.setFont("Helvetica", 10)
-    for data, horarios in dias.items():
-        if y < 50: # Nova página se acabar espaço
+        # A. Verifica Exceções
+        eh_folga = False
+        motivo = ""
+        if cursor in lista_feriados: eh_folga = True; motivo = "(Feriado)"
+        if not eh_folga:
+            for rec in lista_recessos:
+                if rec.data_inicio <= cursor <= rec.data_fim: eh_folga = True; motivo = "(Recesso)"; break
+        
+        # B. Define Meta
+        if eh_folga: meta_dia = 0
+        elif dia_semana in dias_trabalho: meta_dia = meta_padrao
+        else: meta_dia = 0
+
+        # C. Calcula Horas
+        pontos = mapa_pontos.get(data_str, [])
+        horarios_dt = [pt.data_hora for pt in pontos]
+        horarios_dt.sort()
+        
+        minutos_trab = 0
+        horarios_texto = [] # Para imprimir na coluna 2
+        
+        # Formata horários para texto (ex: "08:00 | 12:00")
+        for pt in pontos:
+            horarios_texto.append(pt.data_hora.astimezone().strftime('%H:%M'))
+        
+        # Cálculo matemático
+        for i in range(0, len(horarios_dt), 2):
+            if i+1 < len(horarios_dt):
+                delta = (horarios_dt[i+1] - horarios_dt[i]).total_seconds() / 60
+                minutos_trab += delta
+
+        # D. Lógica de Falta / Saldo
+        saldo = minutos_trab - meta_dia
+        eh_falta = (meta_dia > 0 and minutos_trab == 0 and cursor < date.today())
+        
+        # Textos Finais
+        str_data = cursor.strftime('%d/%m/%Y')
+        str_batidas = " | ".join(horarios_texto)
+        str_trab = f"{int(minutos_trab//60):02d}:{int(minutos_trab%60):02d}"
+        
+        sinal = "+" if saldo >= 0 else "-"
+        saldo_abs = abs(saldo)
+        str_saldo = f"{sinal}{int(saldo_abs//60):02d}:{int(saldo_abs%60):02d}"
+
+        # Ajustes Visuais para Exceções
+        cor_linha = colors.black
+        if eh_folga:
+            str_batidas = motivo # Escreve "Feriado" no lugar das horas
+            str_trab = "-"
+            str_saldo = "-"
+            cor_linha = colors.blue
+        elif eh_falta:
+            str_batidas = "FALTA"
+            str_trab = "00:00"
+            # Saldo já calculado como negativo ali em cima
+            cor_linha = colors.red
+
+        # --- IMPRESSÃO NO PDF ---
+        # Verifica quebra de página
+        if y < 50:
             p.showPage()
             y = height - 50
-            
-        horarios_str = " | ".join(horarios)
-        p.drawString(50, y, data)
-        p.drawString(150, y, horarios_str[:40]) # Corta se for mto longo
+            p.setFont("Helvetica", 9)
         
-        # (Aqui você colocaria o cálculo de horas trabalhadas)
-        p.drawString(350, y, "Calculando...") 
+        p.setFillColor(cor_linha)
+        p.drawString(40, y, str_data)
+        p.drawString(110, y, str_batidas[:55]) # Corta se for muito longo
+        p.drawString(380, y, str_trab)
+        p.drawString(450, y, str_saldo)
         
-        y -= 20
-        p.line(50, y+15, 550, y+15) # Linha divisória fraca
+        y -= 15 # Pula linha
+        p.setFillColor(colors.black) # Reseta cor
+        p.line(40, y+12, 550, y+12) # Linha divisória fina
+
+        cursor += timedelta(days=1)
 
     p.showPage()
     p.save()
